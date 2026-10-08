@@ -1,0 +1,59 @@
+
+name: Build MIPS Kernel
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "build.sh"
+      - "build.conf"
+      - "linconf"
+      - ".github/workflows/kernel.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Cross-compile Linux kernel
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout distro repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            libncurses-dev \
+            xz-utils \
+            curl \
+            ca-certificates
+
+      - name: Run kernel build script
+        run: |
+          chmod +x ./build.sh
+          ./build.sh
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: upkernel
+          path: upkernel/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload modules artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: upmods
+          path: upmods/
+          if-no-files-found: error
+          retention-days: 14
