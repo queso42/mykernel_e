@@ -134,7 +134,7 @@ make -C "$KERNEL" \
     ARCH="$ARCH" \
     CROSS_COMPILE="$CROSS_COMPILE" \
     -j"$(nproc)" \
-    vmlinux modules
+    vmlinuz modules
 
 # --------------------------------------------------
 # Stage kernel artifacts
