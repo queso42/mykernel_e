@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-#if this looks like slop, forgive me for using got
 set -Eeuo pipefail
 
 # --------------------------------------------------
@@ -10,7 +9,8 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$ROOT/build.conf"
 
 : "${arch:?Missing arch in build.conf}"
-: "${toolarch:?Missing toolarch in build.conf}"
+: "${tooltriplet:?Missing tooltriplet in build.conf}"
+: "${kernel_target:?Missing kernel_target in build.conf}"
 : "${linux_version:?Missing linux_version in build.conf}"
 : "${kernel_files:?Missing kernel_files in build.conf}"
 
@@ -35,7 +35,7 @@ ARCHIVE="$WORK/$TARBALL"
 UPKERNEL="$ROOT/upkernel"
 UPMODS="$ROOT/upmods"
 
-CROSS_COMPILE="${toolarch}-linux-gnu-"
+CROSS_COMPILE="${tooltriplet}-"
 
 export ARCH="$arch"
 export CROSS_COMPILE
@@ -57,8 +57,8 @@ sudo apt-get update
 
 sudo apt-get install -y \
     build-essential \
-    "gcc-${toolarch}-linux-gnu" \
-    "binutils-${toolarch}-linux-gnu" \
+    "gcc-${tooltriplet}" \
+    "binutils-${tooltriplet}" \
     bc bison flex patch \
     libssl-dev libelf-dev libncurses-dev \
     xz-utils curl ca-certificates kmod
@@ -134,7 +134,7 @@ make -C "$KERNEL" \
     ARCH="$ARCH" \
     CROSS_COMPILE="$CROSS_COMPILE" \
     -j"$(nproc)" \
-    vmlinuz modules
+    "$kernel_target" modules
 
 # --------------------------------------------------
 # Stage kernel artifacts
