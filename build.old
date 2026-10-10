@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-# Deterministic glob/sort order and messages.
-export LC_ALL=C
+set -Eeuo pipefail
 
 # --------------------------------------------------
 # Paths and configuration
@@ -25,17 +22,16 @@ if [[ ! "$VERSION" =~ ^([0-9]+)\.([0-9]+)(\.([0-9]+))?$ ]]; then
 fi
 
 MAJOR="${BASH_REMATCH[1]}"
+MINOR="${BASH_REMATCH[2]}"
 
-BASE_URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x"
+# Kernel.org keeps major/minor and stable patch tarballs
+# together under the relevant major-version directory.
 TARBALL="linux-${VERSION}.tar.xz"
-URL="$BASE_URL/$TARBALL"
-SUMS_URL="$BASE_URL/sha256sums.asc"
+URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/${TARBALL}"
 
 WORK="$ROOT/work"
-KERNEL="$WORK/linux-$VERSION"   # pristine source (+ patches)
-BUILD="$WORK/build"             # out-of-tree build output (O=)
+KERNEL="$WORK/linux-$VERSION"
 ARCHIVE="$WORK/$TARBALL"
-SUMS="$WORK/sha256sums.asc"
 UPKERNEL="$ROOT/upkernel"
 UPMODS="$ROOT/upmods"
 
@@ -54,48 +50,34 @@ echo "Source       : $URL"
 echo "======================================"
 
 # --------------------------------------------------
-# Check build tools (installed by the workflow)
+# Dependencies
 # --------------------------------------------------
 
-missing=0
-for tool in make bc bison flex patch curl xz zstd tar sha256sum depmod \
-            "${CROSS_COMPILE}gcc" "${CROSS_COMPILE}ld"; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        echo "Missing required tool: $tool" >&2
-        missing=1
-    fi
-done
-(( missing == 0 )) || exit 1
+sudo apt-get update
+
+sudo apt-get install -y \
+    build-essential \
+    "gcc-${tooltriplet}" \
+    "binutils-${tooltriplet}" \
+    bc bison flex patch \
+    libssl-dev libelf-dev libncurses-dev \
+    xz-utils curl ca-certificates kmod
 
 # --------------------------------------------------
-# Download, verify and extract Linux source tarball
+# Download and extract Linux source tarball
 # --------------------------------------------------
 
-rm -rf "$WORK"
-mkdir -p "$WORK" "$BUILD"
+mkdir -p "$WORK"
 
 echo "Downloading Linux source..."
 
-curl --fail --location --retry 3 --retry-all-errors \
-    "$URL" --output "$ARCHIVE"
-
-curl --fail --location --retry 3 --retry-all-errors \
-    "$SUMS_URL" --output "$SUMS"
-
-echo "Verifying checksum..."
-
-# Match the exact filename (second field) so e.g. 5.15.2 can't match 5.15.222.
-expected="$(awk -v f="$TARBALL" '$2 == f { print $1; exit }' "$SUMS")"
-
-if [[ -z "$expected" ]]; then
-    echo "No checksum found for $TARBALL in sha256sums.asc" >&2
-    exit 1
-fi
-
-echo "$expected  $ARCHIVE" | sha256sum --check --strict -
+curl --fail --location --retry 3 \
+    "$URL" \
+    --output "$ARCHIVE"
 
 echo "Extracting Linux source..."
 
+rm -rf "$KERNEL"
 mkdir -p "$KERNEL"
 
 tar -xJf "$ARCHIVE" \
@@ -108,16 +90,18 @@ tar -xJf "$ARCHIVE" \
 
 if [[ -d "$ROOT/patches" ]]; then
     shopt -s nullglob
+
     PATCHES=("$ROOT"/patches/*.patch)
-    shopt -u nullglob
 
     for patchfile in "${PATCHES[@]}"; do
         echo "Applying patch: ${patchfile##*/}"
 
-        # Fresh tree every run, so no --forward: a patch that does not
-        # apply cleanly is a real error and must fail the build.
-        patch --batch -d "$KERNEL" -p1 < "$patchfile"
+        patch --batch --forward \
+            -d "$KERNEL" \
+            -p1 < "$patchfile"
     done
+
+    shopt -u nullglob
 fi
 
 # --------------------------------------------------
@@ -129,33 +113,28 @@ if [[ ! -f "$ROOT/linconf" ]]; then
     exit 1
 fi
 
-KMAKE=(make -C "$KERNEL" O="$BUILD" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE")
-
 echo "Installing kernel configuration..."
 
-cp "$ROOT/linconf" "$BUILD/.config"
+cp "$ROOT/linconf" "$KERNEL/.config"
 
 echo "Resolving kernel configuration..."
 
-"${KMAKE[@]}" olddefconfig
-
-if grep -q '^CONFIG_MODULES=y' "$BUILD/.config"; then
-    HAVE_MODULES=1
-else
-    HAVE_MODULES=0
-    echo "NOTE: CONFIG_MODULES is not enabled; skipping modules."
-fi
+make -C "$KERNEL" \
+    ARCH="$ARCH" \
+    CROSS_COMPILE="$CROSS_COMPILE" \
+    olddefconfig
 
 # --------------------------------------------------
-# Compile kernel (and modules if enabled)
+# Compile kernel and modules
 # --------------------------------------------------
 
-echo "Building kernel..."
+echo "Building kernel and modules..."
 
-TARGETS=("$kernel_target")
-(( HAVE_MODULES )) && TARGETS+=(modules)
-
-"${KMAKE[@]}" -j"$(nproc)" "${TARGETS[@]}"
+make -C "$KERNEL" \
+    ARCH="$ARCH" \
+    CROSS_COMPILE="$CROSS_COMPILE" \
+    -j"$(nproc)" \
+    "$kernel_target" modules
 
 # --------------------------------------------------
 # Stage kernel artifacts
@@ -164,18 +143,19 @@ TARGETS=("$kernel_target")
 echo "Preparing artifact directories..."
 
 rm -rf "$UPKERNEL" "$UPMODS"
+
 mkdir -p "$UPKERNEL" "$UPMODS"
 
 echo "Copying configured kernel files..."
 
-# kernel_files is whitespace/newline separated; disable globbing so
-# entries are never expanded against the current directory.
-set -f
-# shellcheck disable=SC2206
-FILES=($kernel_files)
-set +f
+while IFS= read -r file || [[ -n "$file" ]]; do
+    # Trim surrounding whitespace.
+    file="${file#"${file%%[![:space:]]*}"}"
+    file="${file%"${file##*[![:space:]]}"}"
 
-for file in "${FILES[@]}"; do
+    # Skip empty lines and comments.
+    [[ -z "$file" || "$file" == \#* ]] && continue
+
     # Reject absolute paths and parent-directory traversal.
     case "$file" in
         /*|..|../*|*/../*|*/..)
@@ -184,28 +164,29 @@ for file in "${FILES[@]}"; do
             ;;
     esac
 
-    # Paths are relative to the build output directory (O=).
-    if [[ ! -f "$BUILD/$file" ]]; then
+    if [[ ! -f "$KERNEL/$file" ]]; then
         echo "Kernel artifact not found: $file" >&2
         echo "Check kernel_files in build.conf." >&2
         exit 1
     fi
 
-    ( cd "$BUILD" && cp --parents -- "$file" "$UPKERNEL" )
-done
+    (
+        cd "$KERNEL"
+        cp --parents -- "$file" "$UPKERNEL"
+    )
+done <<< "$kernel_files"
 
 # --------------------------------------------------
 # Stage kernel modules separately
 # --------------------------------------------------
 
-if (( HAVE_MODULES )); then
-    echo "Installing kernel modules into upmods/..."
+echo "Installing kernel modules into upmods/..."
 
-    "${KMAKE[@]}" \
-        INSTALL_MOD_PATH="$UPMODS" \
-        INSTALL_MOD_STRIP=1 \
-        modules_install
-fi
+make -C "$KERNEL" \
+    ARCH="$ARCH" \
+    CROSS_COMPILE="$CROSS_COMPILE" \
+    INSTALL_MOD_PATH="$UPMODS" \
+    modules_install
 
 # --------------------------------------------------
 # Verify artifact outputs
@@ -216,8 +197,9 @@ if [[ -z "$(find "$UPKERNEL" -type f -print -quit)" ]]; then
     exit 1
 fi
 
-if (( HAVE_MODULES )) && [[ -z "$(find "$UPMODS" -type f -print -quit)" ]]; then
-    echo "ERROR: CONFIG_MODULES=y but upmods/ contains no files." >&2
+if [[ -z "$(find "$UPMODS" -type f -print -quit)" ]]; then
+    echo "ERROR: upmods/ contains no files." >&2
+    echo "Check whether your kernel configuration builds modules." >&2
     exit 1
 fi
 
@@ -236,3 +218,4 @@ find "$UPMODS" -type f -printf '%P\n'
 
 echo
 echo "Artifacts are ready for GitHub Actions."
+

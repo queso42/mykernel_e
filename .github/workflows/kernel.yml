@@ -2,16 +2,27 @@ name: Build Kernel
 
 on:
   workflow_dispatch:
-  push:
-    paths:
+  pull_request:
+    paths: &paths
       - "build.sh"
       - "build.conf"
       - "linconf"
       - "patches/**"
       - ".github/workflows/kernel.yml"
+  push:
+    paths: *paths
 
 permissions:
   contents: read
+
+# Cancel superseded runs on the same ref instead of stacking long builds.
+concurrency:
+  group: kernel-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build:
@@ -21,13 +32,29 @@ jobs:
 
     steps:
       - name: Checkout distro repository
-        uses: actions/checkout@v4
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          source ./build.conf
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            "gcc-${tooltriplet}" \
+            "binutils-${tooltriplet}" \
+            bc bison flex patch \
+            libssl-dev libelf-dev libncurses-dev \
+            xz-utils zstd curl ca-certificates kmod
 
       - name: Build kernel
         run: bash ./build.sh
 
       - name: Upload kernel artifact
-        uses: actions/upload-artifact@v4
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: upkernel
           path: upkernel/
@@ -35,9 +62,22 @@ jobs:
           retention-days: 14
 
       - name: Upload modules artifact
-        uses: actions/upload-artifact@v4
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: upmods
           path: upmods/
-          if-no-files-found: error
+          # Empty is legitimate when CONFIG_MODULES is off;
+          # build.sh already errors if modules are enabled but missing.
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload resolved .config
+        if: always()
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: upconfig
+          path: work/build/.config
+          if-no-files-found: ignore
           retention-days: 14
