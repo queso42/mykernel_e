@@ -205,6 +205,12 @@ if (( HAVE_MODULES )); then
         INSTALL_MOD_PATH="$UPMODS" \
         INSTALL_MOD_STRIP=1 \
         modules_install
+
+    # modules_install leaves absolute build/ and source/ symlinks pointing
+    # at the CI work tree. They are useless off this runner, and archiving
+    # tools follow them, pulling in the whole kernel source and build tree.
+    find "$UPMODS/lib/modules" -mindepth 2 -maxdepth 2 -type l \
+        \( -name build -o -name source \) -print -delete
 fi
 
 # --------------------------------------------------
